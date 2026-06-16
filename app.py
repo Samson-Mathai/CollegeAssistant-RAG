@@ -20,12 +20,10 @@ import sys
 # 2. Try hardcoded local keys
 hardcoded_mongo = ""
 hardcoded_gemini = ""
-hardcoded_admin = "admin123"
 try:
     import key_param
     hardcoded_mongo = key_param.MONGODB_URI
     hardcoded_gemini = key_param.GEMINI_API_KEY
-    hardcoded_admin = getattr(key_param, "ADMIN_PASSWORD", "admin123")
 except ImportError:
     pass
 
@@ -33,7 +31,6 @@ except ImportError:
 try:
     hardcoded_mongo = hardcoded_mongo or st.secrets.get("MONGODB_URI", "")
     hardcoded_gemini = hardcoded_gemini or st.secrets.get("GEMINI_API_KEY", "")
-    hardcoded_admin = st.secrets.get("ADMIN_PASSWORD", hardcoded_admin)
 except Exception:
     pass
 
@@ -52,36 +49,35 @@ st.markdown("Upload multiple PDFs (like Timetables, HELB Guidelines, Student Han
 
 import re
 
-# Sidebar: Configuration & FAQs 
+# --- Google OAuth Authentication ---
+if not st.user.is_logged_in:
+    st.markdown("Sign in with your Google account to access the AI assistant.")
+    if st.button("🔐 Log in with Google"):
+        st.login("google")
+    st.stop()
+
+# --- User is authenticated ---
+user_email = st.user.email
+user_name = st.user.name or user_email
+ADMIN_EMAILS = ["samsonmathai77@gmail.com"]
+role = "ADMIN" if user_email in ADMIN_EMAILS else "STUDENT"
+active_user_id = "GLOBAL" if role == "ADMIN" else user_email
+
+# Sidebar: User Info & FAQs
 with st.sidebar:
     st.header("🔑 Campus Portal")
     
-    login_input = st.text_input("Enter Student ID or Admin Password", type="password", help="Students: Try BDAT-1234")
+    if role == "ADMIN":
+        st.success(f"👑 Admin: {user_name}")
+        st.caption("Documents you upload will be visible to everyone.")
+    else:
+        st.success(f"🎓 {user_name}")
+        st.caption(f"Logged in as {user_email}")
     
-    role = None
-    active_user_id = None
-    
-    if login_input:
-        if login_input == hardcoded_admin:
-            role = "ADMIN"
-            active_user_id = "GLOBAL"
-            st.success("👑 Logged in as Administrator")
-            st.caption("Documents you upload will be visible to everyone.")
-        elif re.match(r"^[A-Za-z]{3,4}-\d{4}$", login_input):
-            role = "STUDENT"
-            active_user_id = login_input.upper()
-            st.success(f"🎓 Logged in as Student: {active_user_id}")
-            st.caption("Documents you upload are perfectly private.")
-        else:
-            st.error("❌ Invalid ID format. (Example: BDAT-1234)")
+    if st.button("🚪 Log out"):
+        st.logout()
     
     st.divider()
-
-# --- Role Security Check ---
-if not role:
-    st.warning("👈 Please login with your Student ID to unlock the AI!")
-    st.stop()
-
     
     st.header("Frequently Asked Questions")
     with st.expander("How do I avoid losing progress?"):
