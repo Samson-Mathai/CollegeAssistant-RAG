@@ -1,0 +1,366 @@
+import streamlit as st
+import os
+import tempfile
+import time
+import pymupdf4llm
+from langchain_text_splitters import MarkdownTextSplitter
+from langchain_core.documents import Document
+from langchain_mongodb import MongoDBAtlasVectorSearch
+from langchain_google_genai import GoogleGenerativeAIEmbeddings, ChatGoogleGenerativeAI
+from langchain_core.prompts import PromptTemplate
+from langchain_core.runnables import RunnablePassthrough
+from langchain_core.output_parsers import StrOutputParser
+from pymongo import MongoClient
+import pdfplumber
+import re as re_module
+
+# --- Secret Keys Management ---
+import sys
+
+# 2. Try hardcoded local keys
+hardcoded_mongo = ""
+hardcoded_gemini = ""
+hardcoded_admin = "admin123"
+try:
+    import key_param
+    hardcoded_mongo = key_param.MONGODB_URI
+    hardcoded_gemini = key_param.GEMINI_API_KEY
+    hardcoded_admin = getattr(key_param, "ADMIN_PASSWORD", "admin123")
+except ImportError:
+    pass
+
+# 3. Try Streamlit Cloud Vault
+try:
+    hardcoded_mongo = hardcoded_mongo or st.secrets.get("MONGODB_URI", "")
+    hardcoded_gemini = hardcoded_gemini or st.secrets.get("GEMINI_API_KEY", "")
+    hardcoded_admin = st.secrets.get("ADMIN_PASSWORD", hardcoded_admin)
+except Exception:
+    pass
+
+# Lock the Database Connection globally
+MONGODB_URI = hardcoded_mongo
+GEMINI_API_KEY = hardcoded_gemini
+
+if not MONGODB_URI or not GEMINI_API_KEY:
+    st.error("🚨 Master Keys are missing from the Cloud Vault! The Database is locked.")
+    st.stop()
+
+#  UI Configuration 
+st.set_page_config(page_title="Campus Affairs Navigator", layout="wide")
+st.title("Campus Affairs Navigator")
+st.markdown("Upload multiple PDFs (like Timetables, HELB Guidelines, Student Handbooks) and ask questions! The AI will answer and cite exactly which document the answer came from.")
+
+import re
+
+# Sidebar: Configuration & FAQs 
+with st.sidebar:
+    st.header("🔑 Campus Portal")
+    
+    login_input = st.text_input("Enter Student ID or Admin Password", type="password", help="Students: Try BDAT-1234")
+    
+    role = None
+    active_user_id = None
+    
+    if login_input:
+        if login_input == hardcoded_admin:
+            role = "ADMIN"
+            active_user_id = "GLOBAL"
+            st.success("👑 Logged in as Administrator")
+            st.caption("Documents you upload will be visible to everyone.")
+        elif re.match(r"^[A-Za-z]{3,4}-\d{4}$", login_input):
+            role = "STUDENT"
+            active_user_id = login_input.upper()
+            st.success(f"🎓 Logged in as Student: {active_user_id}")
+            st.caption("Documents you upload are perfectly private.")
+        else:
+            st.error("❌ Invalid ID format. (Example: BDAT-1234)")
+    
+    st.divider()
+
+# --- Role Security Check ---
+if not role:
+    st.warning("👈 Please login with your Student ID to unlock the AI!")
+    st.stop()
+
+    
+    st.header("Frequently Asked Questions")
+    with st.expander("How do I avoid losing progress?"):
+        st.write("This app is incredibly smart. It checks your MongoDB database before processing a file. If it crashes on PDF #6 because you ran out of tokens, just change your API key above and upload all 16 again. It will instantly skip 1-5 because they are already saved, and resume exactly at #6!")
+    with st.expander("How does it know the answer?"):
+        st.write("It uses Retrieval-Augmented Generation (RAG). It mathematically searches your uploaded PDFs for the most relevant paragraphs, and hands them to Gemini to read and summarize for you.")
+    with st.expander("What should I upload?"):
+        st.write("Upload official HELB Manuals, Ministry of Education Funding Guidelines, University Fee Structures, or Student Rulebooks.")
+
+#Database and AI Setup
+@st.cache_resource(show_spinner=False)
+def get_mongo_client():
+    return MongoClient(MONGODB_URI)
+
+# --- MongoDB Setup ---
+client = get_mongo_client()
+collection = client["book_mongodb_chunks"]["chunked_data"]
+
+# --- AI Models Setup ---
+embeddings = GoogleGenerativeAIEmbeddings(model="models/gemini-embedding-2", google_api_key=GEMINI_API_KEY)
+vector_store = MongoDBAtlasVectorSearch(
+    collection=collection,
+    embedding=embeddings,
+    index_name="vector_index"
+)
+llm = ChatGoogleGenerativeAI(model="gemini-2.5-flash", google_api_key=GEMINI_API_KEY, temperature=0)
+
+# --- Timetable Detection & Extraction Helpers ---
+def is_timetable_file(filename):
+    """Returns True if the filename suggests it is a timetable/schedule document."""
+    keywords = ["timetable", "time table", "schedule", "exam", "examination",
+                "class", "lecture", "session", "semester", "calendar"]
+    name_lower = filename.lower()
+    return any(kw in name_lower for kw in keywords)
+
+
+def load_timetable_pdf(tmp_file_path, filename):
+    """Extract tables from a timetable PDF using pdfplumber and convert rows to
+    natural-language sentences so the AI can answer scheduling queries accurately."""
+    all_docs = []
+
+    # --- Column-header mapping (flexible) ---
+    DAY_KEYS = ["day"]
+    TIME_KEYS = ["time", "period"]
+    CODE_KEYS = ["unit code", "course code", "code"]
+    NAME_KEYS = ["unit name", "course name", "subject"]
+    LECTURER_KEYS = ["lecturer", "instructor"]
+    VENUE_KEYS = ["venue", "room", "location"]
+
+    def _match(header, candidates):
+        h = header.strip().lower()
+        return any(h == c for c in candidates)
+
+    with pdfplumber.open(tmp_file_path) as pdf:
+        for page_num, page in enumerate(pdf.pages, start=1):
+            tables = page.extract_tables()
+            for table in tables:
+                if not table or len(table) < 2:
+                    continue
+
+                headers = [str(h).strip() if h else "" for h in table[0]]
+
+                # Build index maps
+                day_idx = next((i for i, h in enumerate(headers) if _match(h, DAY_KEYS)), None)
+                time_idx = next((i for i, h in enumerate(headers) if _match(h, TIME_KEYS)), None)
+                code_idx = next((i for i, h in enumerate(headers) if _match(h, CODE_KEYS)), None)
+                name_idx = next((i for i, h in enumerate(headers) if _match(h, NAME_KEYS)), None)
+                lect_idx = next((i for i, h in enumerate(headers) if _match(h, LECTURER_KEYS)), None)
+                venue_idx = next((i for i, h in enumerate(headers) if _match(h, VENUE_KEYS)), None)
+
+                mapped_indices = {day_idx, time_idx, code_idx, name_idx, lect_idx, venue_idx} - {None}
+
+                for row in table[1:]:
+                    cells = [str(c).strip() if c else "" for c in row]
+                    if all(cell == "" for cell in cells):
+                        continue
+
+                    day = cells[day_idx] if day_idx is not None else ""
+                    time_val = cells[time_idx] if time_idx is not None else ""
+                    code = cells[code_idx] if code_idx is not None else ""
+                    name = cells[name_idx] if name_idx is not None else ""
+                    lecturer = cells[lect_idx] if lect_idx is not None else ""
+                    venue = cells[venue_idx] if venue_idx is not None else ""
+
+                    sentence = f"On {day} from {time_val}, {code} ({name}) is taught by {lecturer} in {venue}."
+
+                    # Append any extra (unmapped) columns
+                    extras = []
+                    for idx, h in enumerate(headers):
+                        if idx not in mapped_indices and cells[idx]:
+                            extras.append(f"{h}: {cells[idx]}")
+                    if extras:
+                        sentence += " " + " ".join(extras)
+
+                    sentence += f" [Source: {filename}, Page {page_num}]"
+
+                    doc = Document(page_content=sentence)
+                    doc.metadata["hasCode"] = False
+                    doc.metadata["source"] = filename
+                    all_docs.append(doc)
+
+            # Also capture any plain text on the page
+            plain_text = page.extract_text()
+            if plain_text:
+                text_splitter = MarkdownTextSplitter(
+                    chunk_size=1500,
+                    chunk_overlap=200
+                )
+                text_doc = Document(page_content=plain_text)
+                text_splits = text_splitter.split_documents([text_doc])
+                for split in text_splits:
+                    split.metadata["hasCode"] = False
+                    split.metadata["source"] = filename
+                all_docs.extend(text_splits)
+
+    return all_docs
+
+
+#  Document Ingestion 
+with st.expander("Upload Campus Documents (Bulk Upload Supported)", expanded=True):
+    st.info("You can drag and drop multiple PDFs here at the same time!")
+    uploaded_files = st.file_uploader("Choose PDF files", type="pdf", accept_multiple_files=True)
+    
+    if uploaded_files:
+        for f in uploaded_files:
+            if is_timetable_file(f.name):
+                st.caption(f"🗓️ {f.name} → Timetable (table-aware extraction)")
+            else:
+                st.caption(f"📃 {f.name} → Standard document")
+        if st.button("Process Documents"):
+            progress_bar = st.progress(0)
+            status_text = st.empty()
+            
+            total_files = len(uploaded_files)
+            
+            for i, uploaded_file in enumerate(uploaded_files):
+                filename = uploaded_file.name
+                status_text.text(f"Checking {filename} ({i+1}/{total_files})...")
+                
+                # Deduplication Check: Check if this file is already in MongoDB
+                existing_doc = collection.find_one({"source": filename})
+                if existing_doc:
+                    st.warning(f"⏩ Skipped '{filename}'. It is already in your database!")
+                    progress_bar.progress((i + 1) / total_files)
+                    continue # Skip to the next file!
+                
+                status_text.text(f"Processing {filename} ({i+1}/{total_files})...")
+                
+                # Save the uploaded file to a temporary location
+                with tempfile.NamedTemporaryFile(delete=False, suffix=".pdf") as tmp_file:
+                    tmp_file.write(uploaded_file.getvalue())
+                    tmp_file_path = tmp_file.name
+
+                try:
+                    if is_timetable_file(filename):
+                        status_text.text(f"🗓️ Timetable detected — using table-aware extraction for {filename}...")
+                        splits = load_timetable_pdf(tmp_file_path, filename)
+                    else:
+                        # 1. Convert PDF to Markdown (Preserves Tables perfectly!)
+                        md_text = pymupdf4llm.to_markdown(tmp_file_path)
+                        
+                        # Wrap the text in a Document object so LangChain can process it
+                        doc = Document(page_content=md_text)
+                        
+                        # 2. Split the Markdown without destroying tables
+                        text_splitter = MarkdownTextSplitter(
+                            chunk_size=1500, # Increased chunk size to keep massive tables together
+                            chunk_overlap=200
+                        )
+                        splits = text_splitter.split_documents([doc])
+                        
+                        # 3. Add metadata (CRUCIAL FOR SOURCE TRACKING)
+                        for split in splits:
+                            split.metadata["hasCode"] = False
+                            split.metadata["source"] = filename # Track exactly which PDF this chunk came from
+                    
+                    if len(splits) == 0:
+                        st.error(f"No text found in {filename}. It might be a scanned image.")
+                        continue
+                        
+                    # 4. Upload to MongoDB in smaller batches to avoid rate limits
+                    import time
+                    batch_size = 5
+                    for i in range(0, len(splits), batch_size):
+                        batch = splits[i:i+batch_size]
+                        status_text.text(f"Uploading batch {i//batch_size + 1} of {(len(splits)-1)//batch_size + 1} for {filename}...")
+                        try:
+                            MongoDBAtlasVectorSearch.from_documents(
+                                documents=batch,
+                                embedding=embeddings,
+                                collection=collection,
+                                index_name="vector_index"
+                            )
+                            time.sleep(8) # Much longer sleep to respect Free Tier API rate limits!
+                        except Exception as e:
+                            status_text.text(f"Rate limit hit! Cooling down for 30 seconds...")
+                            time.sleep(30)
+                            MongoDBAtlasVectorSearch.from_documents(batch, embeddings, collection=collection, index_name="vector_index")
+                            
+                    st.success(f"✅ Successfully embedded {filename} into MongoDB.")
+                    
+                except Exception as e:
+                    import traceback
+                    st.error(f"❌ Error processing {filename}:\n\n{traceback.format_exc()}")
+                    st.stop() # Stop the loop so they can fix the error/API key
+                finally:
+                    os.remove(tmp_file_path)
+                
+                progress_bar.progress((i + 1) / total_files)
+                
+            status_text.text("All documents processed successfully!")
+
+# --- Main Chat Interface ---
+st.divider()
+st.subheader("Ask Anything About Your Uploaded Documents")
+
+if "messages" not in st.session_state:
+    st.session_state.messages = []
+
+# Display previous chat messages
+for message in st.session_state.messages:
+    with st.chat_message(message["role"]):
+        st.markdown(message["content"])
+
+# Accept user input
+if prompt := st.chat_input("E.g. How do I appeal my HELB Band categorization?"):
+    st.session_state.messages.append({"role": "user", "content": prompt})
+    with st.chat_message("user"):
+        st.markdown(prompt)
+
+    # Generate response
+    with st.chat_message("assistant"):
+        with st.spinner("Searching through your documents..."):
+            
+            # Everyone searches the entire public database
+            retriever = vector_store.as_retriever(
+                search_type="similarity",
+                search_kwargs={"k": 5, "pre_filter": {"hasCode": {"$eq": False}}} 
+            )
+            
+            # The Custom Prompt: Forcing Gemini to cite its sources!
+            template = """
+            You are an expert assistant helping Kenyan university students navigate complex academic and funding documents.
+            
+            First, attempt to answer the user's question using ONLY the provided context from their uploaded documents.
+            If you find the answer in the context, you MUST explicitly cite the [Source: filename] in your answer.
+            
+            If the provided context does NOT contain the answer, you are allowed to fall back to your own general knowledge to answer the question. 
+            However, if you do this, you MUST begin your answer with: "⚠️ Note: This information is based on general knowledge, not your uploaded documents."
+            
+            - For timetable questions, state the exact day, time, venue, unit code and lecturer as they appear in the source. Do not paraphrase them.
+            - If asked about exam clashes, check every retrieved entry carefully before concluding whether a clash exists.
+            - Never guess or fabricate timetable data. If a unit is not found in the context, say so explicitly.
+            
+            Context:
+            {context}
+            
+            Question: {question}
+            """
+            custom_rag_prompt = PromptTemplate.from_template(template)
+            
+            # This function formats the text chunks AND attaches the source filename to each one
+            def format_docs(docs):
+                formatted = []
+                for doc in docs:
+                    source_name = doc.metadata.get('source', 'Unknown Document')
+                    formatted.append(f"[Source: {source_name}]\n{doc.page_content}")
+                return "\n\n".join(formatted)
+            
+            rag_chain = (
+                {"context": retriever | format_docs, "question": RunnablePassthrough()}
+                | custom_rag_prompt
+                | llm
+                | StrOutputParser()
+            )
+            
+            try:
+                response = rag_chain.invoke(prompt)
+                st.markdown(response)
+                st.session_state.messages.append({"role": "assistant", "content": response})
+            except Exception as e:
+                st.error(f"An error occurred while generating the response: {e}. If you ran out of tokens, swap your API key in the sidebar!")

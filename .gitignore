@@ -1,0 +1,12 @@
+# Secret keys - NEVER push this
+key_param.py
+
+# Virtual environment
+venv/
+
+# Python cache
+__pycache__/
+*.pyc
+
+# Streamlit
+.streamlit/secrets.toml
