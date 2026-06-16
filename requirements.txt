@@ -1,1 +1,9 @@
+streamlit
+pymupdf4llm
+langchain
+langchain-core
+langchain-text-splitters
+langchain-mongodb
+langchain-google-genai
+pymongo
 pdfplumber
