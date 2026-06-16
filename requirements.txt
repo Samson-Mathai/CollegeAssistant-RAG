@@ -7,3 +7,4 @@ langchain-mongodb
 langchain-google-genai
 pymongo
 pdfplumber
+authlib
