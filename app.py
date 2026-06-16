@@ -65,16 +65,16 @@ active_user_id = "GLOBAL" if role == "ADMIN" else user_email
 
 # Sidebar: User Info & FAQs
 with st.sidebar:
-    st.header("🔑 Campus Portal")
+    st.header("Campus Portal")
     
     if role == "ADMIN":
-        st.success(f"👑 Admin: {user_name}")
+        st.success(f"Admin - {user_name}")
         st.caption("Documents you upload will be visible to everyone.")
     else:
-        st.success(f"🎓 {user_name}")
+        st.success(f"Student - {user_name}")
         st.caption(f"Logged in as {user_email}")
     
-    if st.button("🚪 Log out"):
+    if st.button("Log out"):
         st.logout()
     
     st.divider()
