@@ -80,12 +80,12 @@ with st.sidebar:
     st.divider()
     
     st.header("Frequently Asked Questions")
-    with st.expander("How do I avoid losing progress?"):
-        st.write("This app is incredibly smart. It checks your MongoDB database before processing a file. If it crashes on PDF #6 because you ran out of tokens, just change your API key above and upload all 16 again. It will instantly skip 1-5 because they are already saved, and resume exactly at #6!")
-    with st.expander("How does it know the answer?"):
-        st.write("It uses Retrieval-Augmented Generation (RAG). It mathematically searches your uploaded PDFs for the most relevant paragraphs, and hands them to Gemini to read and summarize for you.")
-    with st.expander("What should I upload?"):
-        st.write("Upload official HELB Manuals, Ministry of Education Funding Guidelines, University Fee Structures, or Student Rulebooks.")
+    with st.expander("When are exams commencing?"):
+        st.write("Upload your university's academic calendar or exam timetable, then type your question below. The AI will find the exact dates for you.")
+    with st.expander("Why can't I print my examination card?"):
+        st.write("This is usually due to pending fee balances or missing unit registrations. Ask the AI to check your student handbook for the exact clearance requirements.")
+    with st.expander("Summarise my exam timetable"):
+        st.write("Upload your PDF timetable and simply ask 'Summarise my exam timetable' below. The AI will extract all your specific units, dates, times, and venues into a neat list.")
 
 #Database and AI Setup
 @st.cache_resource(show_spinner=False)
