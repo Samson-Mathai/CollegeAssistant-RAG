@@ -52,14 +52,14 @@ import re
 # --- Google OAuth Authentication ---
 if not st.user.is_logged_in:
     st.markdown("Sign in with your Google account to access the AI assistant.")
-    if st.button("🔐 Log in with Google"):
+    if st.button("🔐 Log in with Your School Email"):
         st.login("google")
     st.stop()
 
-# --- User is authenticated ---
+# User is authenticated 
 user_email = st.user.email
 user_name = st.user.name or user_email
-ADMIN_EMAILS = ["samsonmathai77@gmail.com"]
+ADMIN_EMAILS = ["samsonmathai77@gmail.com","mathaisamson6@gmail.com"]
 role = "ADMIN" if user_email in ADMIN_EMAILS else "STUDENT"
 active_user_id = "GLOBAL" if role == "ADMIN" else user_email
 
@@ -172,8 +172,6 @@ def load_timetable_pdf(tmp_file_path, filename):
                     if extras:
                         sentence += " " + " ".join(extras)
 
-                    sentence += f" [Source: {filename}, Page {page_num}]"
-
                     doc = Document(page_content=sentence)
                     doc.metadata["hasCode"] = False
                     doc.metadata["source"] = filename
@@ -261,9 +259,9 @@ with st.expander("Upload Campus Documents (Bulk Upload Supported)", expanded=Tru
                     # 4. Upload to MongoDB in smaller batches to avoid rate limits
                     import time
                     batch_size = 5
-                    for i in range(0, len(splits), batch_size):
-                        batch = splits[i:i+batch_size]
-                        status_text.text(f"Uploading batch {i//batch_size + 1} of {(len(splits)-1)//batch_size + 1} for {filename}...")
+                    for batch_start in range(0, len(splits), batch_size):
+                        batch = splits[batch_start:batch_start+batch_size]
+                        status_text.text(f"Uploading batch {batch_start//batch_size + 1} of {(len(splits)-1)//batch_size + 1} for {filename}...")
                         try:
                             MongoDBAtlasVectorSearch.from_documents(
                                 documents=batch,
@@ -308,55 +306,109 @@ if prompt := st.chat_input("E.g. How do I appeal my HELB Band categorization?"):
     with st.chat_message("user"):
         st.markdown(prompt)
 
-    # Generate response
     with st.chat_message("assistant"):
         with st.spinner("Searching through your documents..."):
-            
-            # Everyone searches the entire public database
+
             retriever = vector_store.as_retriever(
                 search_type="similarity",
-                search_kwargs={"k": 5, "pre_filter": {"hasCode": {"$eq": False}}} 
+                search_kwargs={
+                    "k": 5,
+                    "pre_filter": {"hasCode": {"$eq": False}}
+                }
             )
-            
-            # The Custom Prompt: Forcing Gemini to cite its sources!
+
             template = """
-            You are an expert assistant helping Kenyan university students navigate complex academic and funding documents.
-            
-            First, attempt to answer the user's question using ONLY the provided context from their uploaded documents.
-            If you find the answer in the context, you MUST explicitly cite the [Source: filename] in your answer.
-            
-            If the provided context does NOT contain the answer, you are allowed to fall back to your own general knowledge to answer the question. 
-            However, if you do this, you MUST begin your answer with: "⚠️ Note: This information is based on general knowledge, not your uploaded documents."
-            
-            - For timetable questions, state the exact day, time, venue, unit code and lecturer as they appear in the source. Do not paraphrase them.
-            - If asked about exam clashes, check every retrieved entry carefully before concluding whether a clash exists.
-            - Never guess or fabricate timetable data. If a unit is not found in the context, say so explicitly.
-            
-            Context:
-            {context}
-            
-            Question: {question}
-            """
+You are an expert assistant helping Kenyan university students navigate 
+academic and funding documents.
+
+RULE 1 — SOURCE GROUNDING:
+Answer using ONLY the provided context. Cite the source ONCE at the 
+very bottom of your response as: Source: [filename]
+If the context does not contain the answer, begin with:
+"⚠️ Note: This information is based on general knowledge, 
+not your uploaded documents."
+
+RULE 2 — TIMETABLE FORMAT (apply ONLY when the question asks for a 
+timetable, schedule, or class list):
+
+❌ DO NOT use bullet points
+❌ DO NOT organise by subject name  
+❌ DO NOT repeat the source on every entry
+❌ DO NOT add text like "closest match for..."
+❌ DO NOT list Day / Time / Venue / Lecturer as separate lines
+
+✅ Organise by DAY, chronologically (Monday → Friday)
+✅ Use a Markdown table under each day heading
+✅ Sort entries within each day by start time
+✅ Cite the source ONCE at the very bottom only
+✅ Deduplicate — if the same class appears twice in context, list it once
+
+USE EXACTLY THIS FORMAT for timetable responses:
+
+📅 **MONDAY, 22 JUNE 2026**
+| Time          | Venue   | Subject                           | Lecturer              |
+|---------------|---------|-----------------------------------|-----------------------|
+| 10:00 – 12:00 | R2      | Personal Computer Software Support| Mr. Mwangi / Dennis   |
+
+📅 **TUESDAY, 23 JUNE 2026**
+| Time          | Venue   | Subject                           | Lecturer              |
+|---------------|---------|-----------------------------------|-----------------------|
+| 12:30 – 14:30 | ATS A   | IT Virtualisation                 | Mr. Wesley / Harrison |
+| 15:00 – 17:00 | ICT LAB | Info Systems Analysis & Design    | Mr. Wesley / Harrison |
+
+Source: ICT-TIMETABLE.pdf
+
+RULE 3 — EXAM CLASHES:
+Check every retrieved entry carefully before concluding whether 
+a clash exists. Never fabricate timetable data.
+
+CONTEXT:
+{context}
+
+QUESTION: {question}
+
+OUTPUT:"""
+
             custom_rag_prompt = PromptTemplate.from_template(template)
-            
-            # This function formats the text chunks AND attaches the source filename to each one
+
+            # FIXED: Source appears ONCE in context, not on every chunk
             def format_docs(docs):
-                formatted = []
+                sources = set()
+                chunks = []
+
                 for doc in docs:
                     source_name = doc.metadata.get('source', 'Unknown Document')
-                    formatted.append(f"[Source: {source_name}]\n{doc.page_content}")
-                return "\n\n".join(formatted)
-            
+                    sources.add(source_name)
+                    # No source tag on individual chunks anymore
+                    chunks.append(doc.page_content)
+
+                context_text = "\n\n".join(chunks)
+
+                # Append all unique sources once at the bottom of context
+                if sources:
+                    source_list = ", ".join(sorted(sources))
+                    context_text += f"\n\nAvailable sources: {source_list}"
+
+                return context_text
+
             rag_chain = (
                 {"context": retriever | format_docs, "question": RunnablePassthrough()}
                 | custom_rag_prompt
                 | llm
                 | StrOutputParser()
             )
-            
+
             try:
                 response = rag_chain.invoke(prompt)
                 st.markdown(response)
-                st.session_state.messages.append({"role": "assistant", "content": response})
+                st.session_state.messages.append({
+                    "role": "assistant",
+                    "content": response
+                })
             except Exception as e:
-                st.error(f"An error occurred while generating the response: {e}. If you ran out of tokens, swap your API key in the sidebar!")
+                st.error(
+                    f"An error occurred: {e}. "
+                    f"If you ran out of tokens, swap your API key in the sidebar!"
+                )
+
+
