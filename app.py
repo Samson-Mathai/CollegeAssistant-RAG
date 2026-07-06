@@ -51,6 +51,11 @@ st.markdown("Upload multiple PDFs (like Timetables, HELB Guidelines, Student Han
 
 import re
 
+# --- Static Sidebar Content (Visible to Everyone) ---
+with st.sidebar:
+    st.image("rvibs_logo.png", use_container_width=True)
+    st.header("Campus Portal")
+
 # --- Google OAuth Authentication ---
 if not st.user.is_logged_in:
     st.markdown("Sign in with your Google account to access the AI assistant.")
@@ -67,8 +72,6 @@ active_user_id = "GLOBAL" if role == "ADMIN" else user_email
 
 # Sidebar: User Info & FAQs
 with st.sidebar:
-    st.image("rvibs_logo.png", use_container_width=True)
-    st.header("Campus Portal")
     
     if role == "ADMIN":
         st.success(f"Admin - {user_name}")
