@@ -46,6 +46,7 @@ if not MONGODB_URI or not GEMINI_API_KEY:
 
 #  UI Configuration 
 st.set_page_config(page_title="Campus Affairs Navigator", layout="wide")
+st.image("rvibs_logo.png", width=300)
 st.title("Campus Affairs Navigator")
 st.markdown("Upload multiple PDFs (like Timetables, HELB Guidelines, Student Handbooks) and ask questions! The AI will answer and cite exactly which document the answer came from.")
 
@@ -53,7 +54,6 @@ import re
 
 # --- Static Sidebar Content (Visible to Everyone) ---
 with st.sidebar:
-    st.image("rvibs_logo.png", use_container_width=True)
     st.header("Campus Portal")
 
 # --- Google OAuth Authentication ---
