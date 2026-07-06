@@ -17,6 +17,8 @@ import re as re_module
 # --- Secret Keys Management ---
 import sys
 
+st.logo("rvibs_logo.png")
+
 # 2. Try hardcoded local keys
 hardcoded_mongo = ""
 hardcoded_gemini = ""
