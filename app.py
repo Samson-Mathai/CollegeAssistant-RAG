@@ -17,7 +17,7 @@ import re as re_module
 # --- Secret Keys Management ---
 import sys
 
-st.logo("rvibs_logo.png")
+
 
 # 2. Try hardcoded local keys
 hardcoded_mongo = ""
@@ -67,6 +67,7 @@ active_user_id = "GLOBAL" if role == "ADMIN" else user_email
 
 # Sidebar: User Info & FAQs
 with st.sidebar:
+    st.image("rvibs_logo.png", use_container_width=True)
     st.header("Campus Portal")
     
     if role == "ADMIN":
